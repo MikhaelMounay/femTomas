@@ -7,7 +7,7 @@ import type { ReservationStation } from "./types/ReservationStation";
 import type { ROBEntry } from "./types/ROBEntry";
 
 export class CPU {
-    cycle: number = 0;
+    cycle: number = 1;
     program: Instruction[] = [];
     pc: number = 0;
 
@@ -24,7 +24,7 @@ export class CPU {
     // Functional Units (FU)
     functionalUnits: FunctionalUnit[] = [];
 
-    // TODO: bookkeeping for output
+    // bookkeeping for output
     instrTiming: Map<number, Partial<ROBEntry>> = new Map();
 
     constructor() {
@@ -54,6 +54,16 @@ export class CPU {
     loadProgram(program: Instruction[]) {
         this.program = program.slice(); // create an internal copy of the passed program
         this.pc = 0;
+    }
+
+    // Initialize or update memory with data
+    loadMemory(memoryData: Map<number, number> | Record<number, number>) {
+        if (memoryData instanceof Map) {
+            this.memory = new Map(memoryData);
+        } else {
+            // Convert object to Map
+            this.memory = new Map(Object.entries(memoryData).map(([addr, val]) => [Number(addr), val]));
+        }
     }
 
     reset() {
@@ -102,25 +112,54 @@ export class CPU {
         freeStation._destROBId = robId;
         freeStation._instrId = instr._id;
 
-        // operand handling: if source register is destined by ROB, set Qj; otherwise Vj from register file
-        if (instr.src1 !== undefined) {
-            const pending = this.findROBWritingReg(instr.src1);
-            if (pending) {
-                freeStation.Qj = pending._id;
-                freeStation.Vj = null;
-            } else {
-                freeStation.Vj = this.registers[instr.src1]!;
-                freeStation.Qj = null;
+        // For LOAD/STORE: store offset and handle base register
+        if (instr.type === InstructionType.LOAD || instr.type === InstructionType.STORE) {            
+            freeStation.offset = instr.offset ?? 0;
+
+            // src1 is the base register for address calculation
+            if (instr.src1 !== undefined) {
+                const pending = this.findROBWritingReg(instr.src1);
+                if (pending) {
+                    freeStation.Qj = pending._id;
+                    freeStation.Vj = null;
+                } else {
+                    freeStation.Vj = this.registers[instr.src1]!;
+                    freeStation.Qj = null;
+                }
             }
-        }
-        if (instr.src2 !== undefined) {
-            const pending = this.findROBWritingReg(instr.src2);
-            if (pending) {
-                freeStation.Qk = pending._id;
-                freeStation.Vk = null;
-            } else {
-                freeStation.Vk = this.registers[instr.src2]!;
-                freeStation.Qk = null;
+            
+            // For STORE: src2 is the value to store
+            if (instr.type === InstructionType.STORE && instr.src2 !== undefined) {
+                const pending = this.findROBWritingReg(instr.src2);
+                if (pending) {
+                    freeStation.Qk = pending._id;
+                    freeStation.Vk = null;
+                } else {
+                    freeStation.Vk = this.registers[instr.src2]!;
+                    freeStation.Qk = null;
+                }
+            }
+        } else {
+            // operand handling for non-memory instructions
+            if (instr.src1 !== undefined) {
+                const pending = this.findROBWritingReg(instr.src1);
+                if (pending) {
+                    freeStation.Qj = pending._id;
+                    freeStation.Vj = null;
+                } else {
+                    freeStation.Vj = this.registers[instr.src1]!;
+                    freeStation.Qj = null;
+                }
+            }
+            if (instr.src2 !== undefined) {
+                const pending = this.findROBWritingReg(instr.src2);
+                if (pending) {
+                    freeStation.Qk = pending._id;
+                    freeStation.Vk = null;
+                } else {
+                    freeStation.Vk = this.registers[instr.src2]!;
+                    freeStation.Qk = null;
+                }
             }
         }
 
@@ -136,28 +175,44 @@ export class CPU {
         for (const [fuName, stations] of this.reservationStationsMap.entries()) {
             for (const rs of stations) {
                 if (!rs.busy) continue;
+
                 // check if operands are ready
-                const needsTwo = rs.op && this.needsTwoOperands(rs.op); // check if it uses two operands
-                const ready =
-                    (rs.Qj === null || rs.Qj === undefined) && (!needsTwo || rs.Qk === null || rs.Qk === undefined);
+                let ready = false;
+                if (rs.op === InstructionType.LOAD) {
+                    // LOAD needs only base register (Vj)
+                    ready = rs.Qj === null || rs.Qj === undefined;
+                } else if (rs.op === InstructionType.STORE) {
+                    // STORE needs both base register (Vj) and value to store (Vk)
+                    ready = (rs.Qj === null || rs.Qj === undefined) && (rs.Qk === null || rs.Qk === undefined);
+                } else {
+                    // Other instructions
+                    const needsTwo = rs.op && this.needsTwoOperands(rs.op);
+                    ready = (rs.Qj === null || rs.Qj === undefined) && (!needsTwo || rs.Qk === null || rs.Qk === undefined);
+                }
+
                 if (ready) {
                     if (rs.remaining === undefined) {
                         // start execution: set remaining from FU specs
                         const fu = this.functionalUnits.find((f) => f.name === fuName)!;
-                        rs.remaining = fu.latency;
+                        rs.remaining = fu.latency - 1; // -1 because the execution starts this cycle
                         // record start cycle
                         const rob = this.rob.find((r) => r._id === rs._destROBId)!;
-                        if (rob.execStart === undefined) rob.execStart = this.cycle;
-                        this.instrTiming.get(rs._instrId!)!.execStart = rob.execStart;
+                        if (rob.execStartCycle === undefined) rob.execStartCycle = this.cycle;
+                        this.instrTiming.get(rs._instrId!)!.execStartCycle = rob.execStartCycle;
                     } else if (rs.remaining > 0) {
                         rs.remaining -= 1;
                         if (rs.remaining === 0) {
                             // execution finished
                             const rob = this.rob.find((r) => r._id === rs._destROBId)!;
-                            rob.execComplete = this.cycle;
-                            this.instrTiming.get(rs._instrId!)!.execComplete = this.cycle;
+                            rob.execCompleteCycle = this.cycle;
+                            this.instrTiming.get(rs._instrId!)!.execCompleteCycle = this.cycle;
                             // compute actual result
                             rob.value = this.computeResult(rs);
+                            // For STORE, store the computed address for commit stage
+                            if (rs.op === InstructionType.STORE) {
+                                rob.address = rob.value; // address to write to
+                                rob.storeValue = rs.Vk ?? 0; // value to store
+                            }
                             // ready to be written in the next stage
                             rob.ready = true;
                         }
@@ -169,7 +224,7 @@ export class CPU {
 
     write() {
         // TODO: for simplicity: write results of at most one ROB entry per cycle (common Tomasulo restriction)
-        const readyRob = this.rob.find((r) => r.ready && r.writeResult === undefined);
+        const readyRob = this.rob.find((r) => r.ready && r.writeResultCycle === undefined);
         if (!readyRob) return;
         // write to waiting RS & clear Qj/Qk (actual writing to the RegFile or Mem is in the Commit stage)
         for (const stations of this.reservationStationsMap.values()) {
@@ -186,21 +241,28 @@ export class CPU {
             }
         }
         // mark write result
-        readyRob.writeResult = this.cycle;
-        this.instrTiming.get(readyRob._instrId)!.writeResult = this.cycle;
+        readyRob.writeResultCycle = this.cycle;
+        this.instrTiming.get(readyRob._instrId)!.writeResultCycle = this.cycle;
     }
 
     commit() {
         // commit in program order: head of ROB
         if (this.rob.length === 0) return;
         const head = this.rob[0]!;
-        if (!head.ready) return; // cannot commit
+        if (!head.writeResultCycle) return; // cannot commit
 
         // commit to register file or memory depending on instruction
         const instr = this.program.find((i) => i._id === head._instrId);
-        if (instr && head.dest !== undefined) {
-            // write to register
-            this.registers[head.dest] = head.value ?? 0;
+        if (instr) {
+            if (instr.type === InstructionType.STORE) {
+                // Write to memory
+                if (head.address !== undefined && head.storeValue !== undefined) {
+                    this.memory.set(head.address, head.storeValue);
+                }
+            } else if (head.dest !== undefined) {
+                // Write to register (LOAD and other instructions)
+                this.registers[head.dest] = head.value ?? 0;
+            }
         }
 
         head.commitCycle = this.cycle;
@@ -210,7 +272,7 @@ export class CPU {
         for (const stations of this.reservationStationsMap.values()) {
             for (const rs of stations) {
                 if (rs._destROBId === head._id || rs._instrId === head._instrId) {
-                    // note: this is simplistic; real logic should match rob id
+                    // TODO: note: this is simplistic; real logic should match rob id
                     rs.busy = false;
                     rs.op = InstructionType.ADD;    // let it be the default; it will be overridden anyway
                     rs.Vj = null;
@@ -239,10 +301,14 @@ export class CPU {
         // Debug logging per cycle (optional)
         console.log(`Cycle ${this.cycle}:`);
         console.log(`  PC=${this.pc}`);
-        console.log(`  ROB=`);
-        console.log(this.rob);
-        console.log(`  RS=`);
-        console.log(this.reservationStationsMap)
+        console.log(`  Registers=`);
+        console.log(this.registers)
+        console.log(`  Memory=`);
+        console.log(this.memory);
+        // console.log(`  ROB=`);
+        // console.log(this.rob);
+        // console.log(`  RS=`);
+        // console.log(this.reservationStationsMap)
         
         this.cycle += 1;
     }
@@ -252,7 +318,7 @@ export class CPU {
             this.step();
         }
         return {
-            cycles: this.cycle,
+            cycles: this.cycle - 1,
             instrTiming: this.instrTiming,
         };
     }
@@ -263,7 +329,7 @@ export class CPU {
         const entry: ROBEntry = {
             _id,
             _instrId: instr._id,
-            dest: instr.dest ?? 1, // default to R1 if no dest according to specifications
+            dest: instr.dest ?? undefined, // default to undefined if no dest
             ready: false,
         };
         this.rob.push(entry);
@@ -330,9 +396,14 @@ export class CPU {
             case InstructionType.MUL:
                 return (a * b) & 0xffff;
             case InstructionType.LOAD:
-                // TODO:
-                // compute address: Vj + offset stored in rs.remaining? (we don't keep offset in RS in this starter)
-                return 0;
+                // Compute address: base register (Vj) + offset
+                const loadAddr = (a + (rs.offset ?? 0)) & 0xffff;
+                // Read from memory
+                return this.memory.get(loadAddr) ?? 0;
+            case InstructionType.STORE:
+                const storeAddr = (a + (rs.offset ?? 0)) & 0xffff;
+                // Return the address (actual memory write happens in commit)
+                return storeAddr;
             default:
                 return 0;
         }
