@@ -1,5 +1,5 @@
-import { demoProgram } from "./internal/tests/demoProgram";
-import { CPU } from "./internal/cpu";
+import { demoProgram } from "./demoProgram";
+import { CPU } from "../cpu";
 
 const cpu = new CPU();
 cpu.loadProgram(demoProgram);
