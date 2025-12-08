@@ -49,3 +49,7 @@ The simulator supports the following 16-bit instructions:
   Multiplies `rB` by `rC`, stores least significant 16 bits of the result in `rA`.
 
 ---
+
+## Assumptions
+- If `R1` waiting to be written from an instruction in ROB, a `RET` instruction will be issued and wait for `R1` to be ready then return with the address as the new value written to `R1`.
+
