@@ -7,6 +7,7 @@ import RegisterFileView from "./components/RegisterFileView";
 import MemoryView from "./components/MemoryView";
 import ROBView from "./components/ROBView";
 import ReservationStationsView from "./components/ReservationStationsView";
+import { parseMemoryInit } from "./internal/parser/parseMemoryInit";
 
 // Convert demo program to assembly text for initial display
 const demoAssemblyText = `; Demo Program - Tomasulo Simulator
@@ -32,6 +33,10 @@ L: ADD R1, R1, R1
 Exit:
 `;
 
+const defaultMemoryInit = `4: 10
+8: 20
+12: 30`;
+
 function App() {
     const [cpu] = useState(() => new CPU());
     const [, forceUpdate] = useState(0);
@@ -40,40 +45,41 @@ function App() {
 
     // Assembly editor state
     const [assemblyCode, setAssemblyCode] = useState(demoAssemblyText);
+    const [memoryInitText, setMemoryInitText] = useState(defaultMemoryInit);
     const [parseErrors, setParseErrors] = useState<ParseResult["errors"]>([]);
+    const [memoryErrors, setMemoryErrors] = useState<string[]>([]);
     const [showEditor, setShowEditor] = useState(true);
     const [isProgramLoaded, setIsProgramLoaded] = useState(false);
 
-    const initializeCPU = (program: Instruction[]) => {
+    const initializeCPU = (program: Instruction[], memory: Map<number, number>) => {
         cpu.reset();
         cpu.loadProgram(program);
-        cpu.loadMemory(
-            new Map([
-                [4, 10],
-                [8, 20],
-                [12, 30],
-            ])
-        );
+        cpu.loadMemory(memory);
         setIsProgramLoaded(true);
         forceUpdate((n) => n + 1);
     };
 
     const assembleAndLoad = () => {
-        const result = parseAssembly(assemblyCode);
+        const programResult = parseAssembly(assemblyCode);
+        const memoryResult = parseMemoryInit(memoryInitText);
 
-        if (!result.success) {
-            setParseErrors(result.errors);
+        if (!programResult.success || !memoryResult.success) {
+            setParseErrors(programResult.errors);
+            setMemoryErrors(memoryResult.errors || []);
             return;
         }
 
         setParseErrors([]);
-        initializeCPU(result.instructions);
+        setMemoryErrors([]);
+        initializeCPU(programResult.instructions, memoryResult.memory!);
         setShowEditor(false);
     };
 
     const loadDemoProgram = () => {
         setAssemblyCode(demoAssemblyText);
+        setMemoryInitText(defaultMemoryInit);
         setParseErrors([]);
+        setMemoryErrors([]);
     };
 
     const step = () => {
@@ -178,24 +184,63 @@ function App() {
                         </div>
 
                         <div className="space-y-4">
-                            <textarea
-                                value={assemblyCode}
-                                onChange={(e) => setAssemblyCode(e.target.value)}
-                                className="h-96 w-full rounded-lg border-2 border-gray-300 bg-gray-50 p-4 font-mono text-sm focus:border-blue-500 focus:outline-none"
-                                placeholder="Enter your assembly code here..."
-                                spellCheck={false}
-                            />
+                            {/* Assembly Code Editor */}
+                            <div>
+                                <label className="mb-2 block text-sm font-semibold text-gray-700">Assembly Code</label>
+                                <textarea
+                                    value={assemblyCode}
+                                    onChange={(e) => setAssemblyCode(e.target.value)}
+                                    className="h-80 w-full rounded-lg border-2 border-gray-300 bg-gray-50 p-4 font-mono text-sm focus:border-blue-500 focus:outline-none"
+                                    placeholder="Enter your assembly code here..."
+                                    spellCheck={false}
+                                />
+                            </div>
 
-                            {parseErrors.length > 0 && (
-                                <div className="rounded-lg border-2 border-red-300 bg-red-50 p-4">
-                                    <h3 className="mb-2 font-bold text-red-700">Parse Errors:</h3>
-                                    <ul className="space-y-1">
-                                        {parseErrors.map((error, idx) => (
-                                            <li key={idx} className="text-sm text-red-600">
-                                                Line {error.line}: {error.message}
-                                            </li>
-                                        ))}
-                                    </ul>
+                            {/* Memory Initialization Editor */}
+                            <div>
+                                <label className="mb-2 block text-sm font-semibold text-gray-700">
+                                    Memory Initialization
+                                </label>
+                                <textarea
+                                    value={memoryInitText}
+                                    onChange={(e) => setMemoryInitText(e.target.value)}
+                                    className="h-32 w-full rounded-lg border-2 border-gray-300 bg-gray-50 p-4 font-mono text-sm focus:border-blue-500 focus:outline-none"
+                                    placeholder="Enter memory initialization (e.g., 4: 10)"
+                                    spellCheck={false}
+                                />
+                                <p className="mt-1 text-xs text-gray-500">
+                                    Format: One entry per line as "address: value" or "address=value". Comments start with ;
+                                    or //
+                                </p>
+                            </div>
+
+                            {/* Error Display */}
+                            {(parseErrors.length > 0 || memoryErrors.length > 0) && (
+                                <div className="space-y-2">
+                                    {parseErrors.length > 0 && (
+                                        <div className="rounded-lg border-2 border-red-300 bg-red-50 p-4">
+                                            <h3 className="mb-2 font-bold text-red-700">Assembly Parse Errors:</h3>
+                                            <ul className="space-y-1">
+                                                {parseErrors.map((error, idx) => (
+                                                    <li key={idx} className="text-sm text-red-600">
+                                                        Line {error.line}: {error.message}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
+                                    {memoryErrors.length > 0 && (
+                                        <div className="rounded-lg border-2 border-red-300 bg-red-50 p-4">
+                                            <h3 className="mb-2 font-bold text-red-700">Memory Initialization Errors:</h3>
+                                            <ul className="space-y-1">
+                                                {memoryErrors.map((error, idx) => (
+                                                    <li key={idx} className="text-sm text-red-600">
+                                                        {error}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
@@ -373,7 +418,8 @@ function App() {
 
                         <div className="border-t border-gray-200 pt-3 text-center text-xs text-gray-500">
                             <p className="mt-2 text-sm text-gray-500">
-                                Made with ❤️ by <strong>AUC</strong> Students, <em>CSCE 3301 - Computer Architecture</em> Course Project, Fall 2025
+                                Made with ❤️ by <strong>AUC</strong> Students, <em>CSCE 3301 - Computer Architecture</em>{" "}
+                                Course Project, Fall 2025
                             </p>
                         </div>
                     </div>
