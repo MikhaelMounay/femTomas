@@ -341,6 +341,43 @@ function App() {
                         </div>
                     </div>
                 )}
+
+                {/* Footer - Project Info */}
+                <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-lg">
+                    <div className="space-y-3">
+                        <div className="flex items-center justify-between border-b border-gray-200 pb-3">
+                            <h3 className="text-xl font-bold text-gray-800">femTomas</h3>
+                            <span className="text-sm text-gray-500">Tomasulo Algorithm Simulator for RiSC-16</span>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                            <div>
+                                <h4 className="mb-2 font-semibold text-gray-700">Project Information</h4>
+                                <p className="text-sm text-gray-600">
+                                    A web-based simulator implementing the Tomasulo algorithm for dynamic instruction
+                                    scheduling with speculative execution, built with TypeScript and React.
+                                </p>
+                            </div>
+
+                            <div>
+                                <h4 className="mb-2 font-semibold text-gray-700">ISA & Features</h4>
+                                <ul className="space-y-1 text-sm text-gray-600">
+                                    <li>• RiSC-16 inspired by Bruce Jacob's Ridiculously Simple Computer</li>
+                                    <li>• 8-entry Reorder Buffer (ROB) for in-order commit</li>
+                                    <li>• Multiple reservation stations per functional unit</li>
+                                    <li>• Always-not-taken branch prediction with misprediction recovery</li>
+                                    <li>• Assembly language parser with label support</li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        <div className="border-t border-gray-200 pt-3 text-center text-xs text-gray-500">
+                            <p className="mt-2 text-sm text-gray-500">
+                                Made with ❤️ by <strong>AUC</strong> Students, <em>CSCE 3301 - Computer Architecture</em> Course Project, Fall 2025
+                            </p>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     );
