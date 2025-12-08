@@ -352,14 +352,11 @@ export class CPU {
         this.instrTiming.get(readyRob._instrId)!.writeResultCycle = this.cycle;
     }
 
-    // return value is whether PC was updated from a control flow instruction (true)
-    // or should it be updated as PC+1 (false);
-    // this value is used in the step helper method to decide whether to increment PC
-    commit(): boolean {
+    commit() {
         // commit in program order: head of ROB
-        if (this.rob.length === 0) return false;
+        if (this.rob.length === 0) return;
         const head = this.rob[0]!;
-        if (!head.writeResultCycle) return false; // still not written: cannot commit
+        if (!head.writeResultCycle) return; // still not written: cannot commit
 
         // Find corresponding RS for instruction-specific data
         let rs: ReservationStation | undefined;
@@ -377,6 +374,7 @@ export class CPU {
 
             // Flush pipeline: remove all instructions after CALL (they were speculatively fetched)
             this.flushPipeline(head._instrId);
+            console.log(this.rob)
 
             // Update PC to jump to target
             this.pc = rs?.callTarget ?? this.pc;
@@ -385,7 +383,7 @@ export class CPU {
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
             this.freeReservationStation(head._id, head._instrId);
             this.rob.shift();
-            return true;
+            return;
         }
 
         // Handle RET instruction
@@ -400,7 +398,7 @@ export class CPU {
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
             this.freeReservationStation(head._id, head._instrId);
             this.rob.shift();
-            return true;
+            return;
         }
 
         // Handle branch misprediction
@@ -419,7 +417,7 @@ export class CPU {
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
             this.freeReservationStation(head._id, head._instrId);
             this.rob.shift();
-            return true;
+            return;
         }
 
         // Normal commit (non-branch) to register file or memory depending on instruction
@@ -439,18 +437,18 @@ export class CPU {
         this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
         this.freeReservationStation(head._id, head._instrId);
         this.rob.shift();
-        return false;
+        return;
     }
 
     step() {
         // perform pipeline: commit, write, execute, issue in this simple schedule
         // reversed order is to commit first to allow commit and free RS
-        const pcUpdated = this.commit();
+        this.commit();
         this.write();
         this.execute();
         const issueSuccessful = this.issue();
 
-        if (!pcUpdated && this.pc <= this.program.length && issueSuccessful) {
+        if (this.pc <= this.program.length && issueSuccessful) {
             this.pc += 1; // speculatively advance PC (always-not-taken prediction)
         }
 
@@ -492,7 +490,8 @@ export class CPU {
     private findROBWritingReg(reg: number): ROBEntry | undefined {
         // find ROB entry that will write to this register
         // search from the end for latest instructions that write to reg
-        for (let i = this.rob.length - 1; i >= 0; i--) {
+        // exclude the current instruction (i=length-2) to avoid false dependencies
+        for (let i = this.rob.length - 2; i >= 0; i--) {
             const r = this.rob[i]!;
             if (r.dest === reg && !r.ready) return r;
         }
