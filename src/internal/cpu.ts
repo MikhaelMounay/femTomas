@@ -92,22 +92,23 @@ export class CPU {
     }
 
     // simplified issue stage: try to issue one instruction per cycle
-    issue() {
-        if (this.pc >= this.program.length) return; // program ended: nothing to issue
+    // return value: issue successful (true) or stalled (false)
+    issue(): boolean {
+        if (this.pc >= this.program.length) return false; // program ended: nothing to issue
 
         // check ROB capacity
-        if (this.rob.length >= this.robSize) return; // stall
+        if (this.rob.length >= this.robSize) return false; // stall
 
         const instr = this.program[this.pc]!;
 
         // pick RS type
         const fuName = this.getFuForInstr(instr.type);
         const stations = this.reservationStationsMap.get(fuName);
-        if (!stations) return;
+        if (!stations) return false;
 
         // find free RS
         const freeStation = stations.find((s) => !s.busy);
-        if (!freeStation) return; // no free RS: stall
+        if (!freeStation) return false; // no free RS: stall
 
         // allocate ROB entry
         const robId = this.allocateROB(instr);
@@ -217,6 +218,8 @@ export class CPU {
         const robEntry = this.rob.find((r) => r._id === robId)!;
         robEntry.issuedCycle = this.cycle;
         this.instrTiming.set(instr._id, { _instrId: instr._id, issuedCycle: this.cycle });
+
+        return true;
     }
 
     // execute: decrement (remaining) for RS whose operands are ready
@@ -445,9 +448,9 @@ export class CPU {
         const pcUpdated = this.commit();
         this.write();
         this.execute();
-        this.issue();
+        const issueSuccessful = this.issue();
 
-        if (!pcUpdated && this.pc <= this.program.length) {
+        if (!pcUpdated && this.pc <= this.program.length && issueSuccessful) {
             this.pc += 1; // speculatively advance PC (always-not-taken prediction)
         }
 
