@@ -14,29 +14,38 @@ A Tomasulo Algorithm simulator for RiSC-16, built with TypeScript and React-Vite
 The simulator supports the following 16-bit instructions:
 
 ### 1. Load/Store
-- **LOAD rA, offset(rB)**  
+- `LOAD rA, offset(rB)`
+
   Loads a word from memory into `rA`. Address = `rB` + 5-bit signed `offset` (−16 to 15).
-- **STORE rA, offset(rB)**  
+- `STORE rA, offset(rB)`
+
   Stores value from `rA` into memory. Address = `rB` + 5-bit signed `offset`.
 
 ### 2. Conditional Branch
-- **BEQ rA, rB, offset**  
+- `BEQ rA, rB, offset`
+
   Branches to `PC+1+offset` if `rA == rB`. Otherwise, PC increments by one.
 
 ### 3. Call/Return
-- **CALL label**  
+- `CALL label`
+
   Stores `PC+1` in `R1` and jumps unconditionally to the address specified by the label (7-bit signed constant).
-- **RET**  
+- `RET`
+
   Jumps unconditionally to the address stored in `R1`.
 
 ### 4. Arithmetic and Logic
-- **ADD rA, rB, rC**  
+- `ADD rA, rB, rC`
+
   Adds `rB` and `rC`, stores result in `rA`.
-- **SUB rA, rB, rC**  
+- `SUB rA, rB, rC`
+
   Subtracts `rC` from `rB`, stores result in `rA`.
-- **NAND rA, rB, rC**  
+- `NAND rA, rB, rC`
+
   Bitwise NAND of `rB` and `rC`, stores result in `rA`.
-- **MUL rA, rB, rC**  
+- `MUL rA, rB, rC`
+
   Multiplies `rB` by `rC`, stores least significant 16 bits of the result in `rA`.
 
 ---
