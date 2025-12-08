@@ -171,16 +171,14 @@ export class CPU {
                 }
             }
 
-            // Store predicted PC (always-not-taken: continue to next instruction)
-            const robEntry = this.rob.find((r) => r._id === robId)!;
-            robEntry.predictedPC = this.pc + 1; // predict not taken
-            robEntry.branchTarget = this.pc + (instr.offset ?? 0); // actual target if taken
+            freeStation.branchTarget = this.pc + (instr.offset ?? 0); // actual target if taken
         } else if (instr.type === InstructionType.CALL) {
             // CALL: Store PC+1 in R1 and jump to label
             const robEntry = this.rob.find((r) => r._id === robId)!;
             robEntry.dest = 1; // CALL writes return address to R1
-            robEntry.callTarget = instr.label ?? 0; // target address from label
-            robEntry.returnAddress = this.pc + 1; // PC+1 is the return address
+
+            freeStation.callTarget = instr.label ?? 0;
+            freeStation.returnAddress = this.pc + 1;
         } else if (instr.type === InstructionType.RET) {
             // RET: Jump to address in R1
             const pending = this.findROBWritingReg(1); // Check if R1 is being written
@@ -267,26 +265,32 @@ export class CPU {
                             this.instrTiming.get(rs._instrId!)!.execCompleteCycle = this.cycle;
 
                             // compute actual result
-                            rob.value = this.computeResult(rs);
+                            const _computedResult = this.computeResult(rs);
 
                             if (rs.op === InstructionType.CALL) {
                                 // CALL: value to write to R1 is the return address
-                                rob.value = rob.returnAddress;
+                                rs.computedValue = rs.returnAddress; // Store in RS
                                 // Also mark that we need to jump
-                                rob.isControlFlow = true;
+                                rob.value = rs.computedValue; // Copy to ROB
                             } else if (rs.op === InstructionType.RET) {
-                                // RET: get return address from R1 (Vj)
-                                rob.returnTarget = rs.Vj ?? 0;
-                                rob.isControlFlow = true;
+                                rs.computedValue = rs.Vj ?? 0; // Return address from R1
                             } else if (rs.op === InstructionType.BEQ) {
-                                const branchTaken = rob.value === 1;
-                                rob.branchTaken = branchTaken;
+                                // For BEQ, determine if branch should be taken
+                                const branchTaken = _computedResult === 1;
+                                rs.branchTaken = branchTaken;
+
                                 // Check for misprediction (we predicted not-taken)
-                                rob.mispredicted = branchTaken; // mispredicted if branch was actually taken
+                                // mispredicted if branch was actually taken
+                                // because we are using an implicit always-not-taken branch predictor
+                                rs.mispredicted = branchTaken;
+                                rob.value = rs.branchTaken ? 1 : 0; // just to have some value
                             } else if (rs.op === InstructionType.STORE) {
                                 // For STORE, store the computed address for commit stage
-                                rob.address = rob.value; // address to write to
-                                rob.storeValue = rs.Vk ?? 0; // value to store
+                                rs.storeAddress = _computedResult; // address to write to
+                                rs.storeValue = rs.Vk ?? 0; // value to store
+                                rob.value = _computedResult;
+                            } else {
+                                rob.value = _computedResult;
                             }
 
                             // ready to be written in the next stage
@@ -304,13 +308,29 @@ export class CPU {
         if (!readyRob) return;
 
         // For branches and calls, don't broadcast values, just mark as written
-        if (readyRob.mispredicted !== undefined || (readyRob.isControlFlow && readyRob.dest === undefined)) {
+        // Find corresponding RS to check for control flow
+        let isControlFlowNoValue = false;
+        for (const stations of this.reservationStationsMap.values()) {
+            for (const rs of stations) {
+                if (rs._destROBId === readyRob._id) {
+                    // Don't broadcast for RET or mispredicted branches
+                    if (rs.mispredicted || readyRob.type === InstructionType.RET) {
+                        isControlFlowNoValue = true;
+                    }
+                    break;
+                }
+            }
+            if (isControlFlowNoValue) break;
+        }
+
+        if (isControlFlowNoValue) {
             readyRob.writeResultCycle = this.cycle;
             this.instrTiming.get(readyRob._instrId)!.writeResultCycle = this.cycle;
             return;
         }
 
-        // write to waiting RS & clear Qj/Qk (actual writing to the RegFile or Mem is in the Commit stage)
+        // Normal writing: write to waiting RS & clear Qj/Qk
+        // (actual writing to the RegFile or Mem is in the Commit stage)
         for (const stations of this.reservationStationsMap.values()) {
             for (const rs of stations) {
                 if (!rs.busy) continue;
@@ -329,16 +349,24 @@ export class CPU {
         this.instrTiming.get(readyRob._instrId)!.writeResultCycle = this.cycle;
     }
 
+    // return value is whether PC was updated from a control flow instruction (true)
+    // or should it be updated as PC+1 (false);
+    // this value is used in the step helper method to decide whether to increment PC
     commit(): boolean {
         // commit in program order: head of ROB
         if (this.rob.length === 0) return false;
         const head = this.rob[0]!;
         if (!head.writeResultCycle) return false; // still not written: cannot commit
 
-        const instr = this.program.find((i) => i._id === head._instrId);
+        // Find corresponding RS for instruction-specific data
+        let rs: ReservationStation | undefined;
+        for (const stations of this.reservationStationsMap.values()) {
+            rs = stations.find((s) => s._destROBId === head._id);
+            if (rs) break;
+        }
 
         // Handle CALL instruction
-        if (instr?.type === InstructionType.CALL) {
+        if (head.type === InstructionType.CALL) {
             // Write return address (PC+1) to R1 according to CALL instruction specifications
             if (head.dest === 1) {
                 this.registers[1] = head.value ?? 0; // return address
@@ -348,7 +376,7 @@ export class CPU {
             this.flushPipeline(head._instrId);
 
             // Update PC to jump to target
-            this.pc = head.callTarget ?? this.pc;
+            this.pc = rs?.callTarget ?? this.pc;
 
             head.commitCycle = this.cycle;
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
@@ -358,12 +386,12 @@ export class CPU {
         }
 
         // Handle RET instruction
-        if (instr?.type === InstructionType.RET) {
+        if (head.type === InstructionType.RET) {
             // Flush pipeline: remove all instructions after RET (they were speculatively fetched)
             this.flushPipeline(head._instrId);
 
             // Update PC to return address from R1
-            this.pc = head.returnTarget ?? this.pc;
+            this.pc = rs?.computedValue ?? this.pc;
 
             head.commitCycle = this.cycle;
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
@@ -373,44 +401,42 @@ export class CPU {
         }
 
         // Handle branch misprediction
-        let pcUpdated = false;
-        if (head.mispredicted !== undefined) {
+        if (head.type === InstructionType.BEQ) {
             this.totalBranches++;
 
-            if (head.mispredicted) {
+            if (rs?.mispredicted) {
                 this.branchMispredictions++;
                 // Flush pipeline: remove all instructions after this branch
                 this.flushPipeline(head._instrId);
                 // Update PC to branch target
-                this.pc = head.branchTarget ?? this.pc;
-                pcUpdated = true;
+                this.pc = rs.branchTarget ?? this.pc;
             }
 
             head.commitCycle = this.cycle;
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
             this.freeReservationStation(head._id, head._instrId);
             this.rob.shift();
+            return true;
         }
 
         // Normal commit (non-branch) to register file or memory depending on instruction
-        if (instr) {
-            if (instr.type === InstructionType.STORE) {
-                // Write to memory
-                if (head.address !== undefined && head.storeValue !== undefined) {
-                    this.memory.set(head.address, head.storeValue);
-                }
-            } else if (head.dest !== undefined && head.dest !== 0) {
-                // R0 is a read-only zero register
-                // Write to register (LOAD and other instructions)
-                this.registers[head.dest] = head.value ?? 0;
+        // Handle STORE instruction
+        if (head.type === InstructionType.STORE) {
+            // Write to memory
+            if (rs?.storeAddress !== undefined && rs?.storeValue !== undefined) {
+                this.memory.set(rs.storeAddress, rs.storeValue);
             }
+            // Handle the rest of instruction types
+        } else if (head.dest !== undefined && head.dest !== 0) {
+            // R0 is a read-only zero register
+            this.registers[head.dest] = head.value ?? 0;
         }
 
         head.commitCycle = this.cycle;
         this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
         this.freeReservationStation(head._id, head._instrId);
         this.rob.shift();
-        return pcUpdated;
+        return false;
     }
 
     step() {
@@ -452,7 +478,8 @@ export class CPU {
         const entry: ROBEntry = {
             _id,
             _instrId: instr._id,
-            dest: instr.dest ?? undefined, // default to undefined if no dest
+            type: instr.type, // Store instruction type
+            dest: instr.dest,
             ready: false,
         };
         this.rob.push(entry);
