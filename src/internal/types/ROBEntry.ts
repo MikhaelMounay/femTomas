@@ -15,6 +15,12 @@ export interface ROBEntry {
     branchTaken?: boolean; // was branch actually taken?
     mispredicted?: boolean; // was prediction wrong?
     flushed?: boolean; // was this instruction flushed?
+    // for CALL: target address and return address
+    callTarget?: number; // address to jump to
+    returnAddress?: number; // PC+1 to save in R1
+    // for RET: return target
+    returnTarget?: number; // address from R1 to jump to
+    isControlFlow?: boolean; // marks CALL/RET instructions for unconditional jumping
     // state tracking
     issuedCycle?: number;
     execStartCycle?: number;

@@ -175,6 +175,22 @@ export class CPU {
             const robEntry = this.rob.find((r) => r._id === robId)!;
             robEntry.predictedPC = this.pc + 1; // predict not taken
             robEntry.branchTarget = this.pc + (instr.offset ?? 0); // actual target if taken
+        } else if (instr.type === InstructionType.CALL) {
+            // CALL: Store PC+1 in R1 and jump to label
+            const robEntry = this.rob.find((r) => r._id === robId)!;
+            robEntry.dest = 1; // CALL writes return address to R1
+            robEntry.callTarget = instr.label ?? 0; // target address from label
+            robEntry.returnAddress = this.pc + 1; // PC+1 is the return address
+        } else if (instr.type === InstructionType.RET) {
+            // RET: Jump to address in R1
+            const pending = this.findROBWritingReg(1); // Check if R1 is being written
+            if (pending) {
+                freeStation.Qj = pending._id;
+                freeStation.Vj = null;
+            } else {
+                freeStation.Vj = this.registers[1]!; // return address
+                freeStation.Qj = null;
+            }
         } else {
             // operand handling for non-memory, non-branch instructions
             if (instr.src1 !== undefined) {
@@ -203,10 +219,9 @@ export class CPU {
         const robEntry = this.rob.find((r) => r._id === robId)!;
         robEntry.issuedCycle = this.cycle;
         this.instrTiming.set(instr._id, { _instrId: instr._id, issuedCycle: this.cycle });
-        this.pc += 1; // speculatively advance PC (always-not-taken prediction)
     }
 
-    // execute: decrement remaining for RS whose operands are ready
+    // execute: decrement (remaining) for RS whose operands are ready
     execute() {
         for (const [fuName, stations] of this.reservationStationsMap.entries()) {
             for (const rs of stations) {
@@ -216,6 +231,12 @@ export class CPU {
                 let ready = false;
                 if (rs.op === InstructionType.LOAD) {
                     // LOAD needs only base register (Vj)
+                    ready = rs.Qj === null || rs.Qj === undefined;
+                } else if (rs.op === InstructionType.CALL) {
+                    // CALL doesn't need operands, always ready
+                    ready = true;
+                } else if (rs.op === InstructionType.RET) {
+                    // RET needs R1 value (in Vj)
                     ready = rs.Qj === null || rs.Qj === undefined;
                 } else {
                     // Other instructions
@@ -248,7 +269,16 @@ export class CPU {
                             // compute actual result
                             rob.value = this.computeResult(rs);
 
-                            if (rs.op === InstructionType.BEQ) {
+                            if (rs.op === InstructionType.CALL) {
+                                // CALL: value to write to R1 is the return address
+                                rob.value = rob.returnAddress;
+                                // Also mark that we need to jump
+                                rob.isControlFlow = true;
+                            } else if (rs.op === InstructionType.RET) {
+                                // RET: get return address from R1 (Vj)
+                                rob.returnTarget = rs.Vj ?? 0;
+                                rob.isControlFlow = true;
+                            } else if (rs.op === InstructionType.BEQ) {
                                 const branchTaken = rob.value === 1;
                                 rob.branchTaken = branchTaken;
                                 // Check for misprediction (we predicted not-taken)
@@ -273,8 +303,8 @@ export class CPU {
         const readyRob = this.rob.find((r) => r.ready && r.writeResultCycle === undefined);
         if (!readyRob) return;
 
-        // For branches, don't broadcast values, just mark as written
-        if (readyRob.mispredicted !== undefined) {
+        // For branches and calls, don't broadcast values, just mark as written
+        if (readyRob.mispredicted !== undefined || (readyRob.isControlFlow && readyRob.dest === undefined)) {
             readyRob.writeResultCycle = this.cycle;
             this.instrTiming.get(readyRob._instrId)!.writeResultCycle = this.cycle;
             return;
@@ -299,15 +329,51 @@ export class CPU {
         this.instrTiming.get(readyRob._instrId)!.writeResultCycle = this.cycle;
     }
 
-    commit() {
+    commit(): boolean {
         // commit in program order: head of ROB
-        if (this.rob.length === 0) return;
+        if (this.rob.length === 0) return false;
         const head = this.rob[0]!;
-        if (!head.writeResultCycle) return; // cannot commit
+        if (!head.writeResultCycle) return false; // still not written: cannot commit
 
         const instr = this.program.find((i) => i._id === head._instrId);
 
+        // Handle CALL instruction
+        if (instr?.type === InstructionType.CALL) {
+            // Write return address (PC+1) to R1 according to CALL instruction specifications
+            if (head.dest === 1) {
+                this.registers[1] = head.value ?? 0; // return address
+            }
+
+            // Flush pipeline: remove all instructions after CALL (they were speculatively fetched)
+            this.flushPipeline(head._instrId);
+
+            // Update PC to jump to target
+            this.pc = head.callTarget ?? this.pc;
+
+            head.commitCycle = this.cycle;
+            this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
+            this.freeReservationStation(head._id, head._instrId);
+            this.rob.shift();
+            return true;
+        }
+
+        // Handle RET instruction
+        if (instr?.type === InstructionType.RET) {
+            // Flush pipeline: remove all instructions after RET (they were speculatively fetched)
+            this.flushPipeline(head._instrId);
+
+            // Update PC to return address from R1
+            this.pc = head.returnTarget ?? this.pc;
+
+            head.commitCycle = this.cycle;
+            this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
+            this.freeReservationStation(head._id, head._instrId);
+            this.rob.shift();
+            return true;
+        }
+
         // Handle branch misprediction
+        let pcUpdated = false;
         if (head.mispredicted !== undefined) {
             this.totalBranches++;
 
@@ -317,13 +383,13 @@ export class CPU {
                 this.flushPipeline(head._instrId);
                 // Update PC to branch target
                 this.pc = head.branchTarget ?? this.pc;
+                pcUpdated = true;
             }
 
             head.commitCycle = this.cycle;
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
             this.freeReservationStation(head._id, head._instrId);
             this.rob.shift();
-            return;
         }
 
         // Normal commit (non-branch) to register file or memory depending on instruction
@@ -344,15 +410,20 @@ export class CPU {
         this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
         this.freeReservationStation(head._id, head._instrId);
         this.rob.shift();
+        return pcUpdated;
     }
 
     step() {
         // perform pipeline: commit, write, execute, issue in this simple schedule
         // reversed order is to commit first to allow commit and free RS
-        this.commit();
+        const pcUpdated = this.commit();
         this.write();
         this.execute();
         this.issue();
+
+        if (!pcUpdated && this.pc <= this.program.length) {
+            this.pc += 1; // speculatively advance PC (always-not-taken prediction)
+        }
 
         this.cycle += 1;
     }
