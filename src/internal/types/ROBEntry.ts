@@ -16,4 +16,19 @@ export interface ROBEntry {
     writeResultCycle?: number;
     commitCycle?: number;
     flushed?: boolean; // was this instruction squashed?
+
+    // Instruction-specific data (saved from RS before freeing)
+    // Branch-specific
+    branchTarget?: number;
+    mispredicted?: boolean;
+
+    // CALL-specific
+    callTarget?: number;
+
+    // RET-specific
+    returnAddress?: number;
+
+    // STORE-specific
+    storeAddress?: number;
+    storeValue?: number;
 }

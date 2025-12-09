@@ -231,7 +231,12 @@ export class CPU {
                 // check if operands are ready
                 let ready = false;
                 if (rs.op === InstructionType.LOAD) {
-                    // LOAD needs only base register (Vj)
+                    // LOAD needs only base register (Vj) to start address computation
+                    ready = rs.Qj === null || rs.Qj === undefined;
+                } else if (rs.op === InstructionType.STORE) {
+                    // STORE can start address computation with just base register (Vj)
+                    // But needs both Vj and Vk to be ready before starting memory write phase
+                    // We check this in two phases below
                     ready = rs.Qj === null || rs.Qj === undefined;
                 } else if (rs.op === InstructionType.CALL) {
                     // CALL doesn't need operands, always ready
@@ -247,58 +252,110 @@ export class CPU {
 
                 if (ready) {
                     if (rs.remaining === undefined) {
-                        // start execution: set remaining from FU specs
+                        // Start execution: set remaining from FU specs
                         const fu = this.functionalUnits.find((f) => f.name === fuName)!;
-                        rs.remaining = fu.latency - 1; // -1 because the execution starts this cycle
-                        // record start cycle
+
+                        // For LOAD/STORE, only start address computation phase (2 cycles)
+                        if (rs.op === InstructionType.LOAD || rs.op === InstructionType.STORE) {
+                            rs.remaining = 2; // Address computation: 2 cycles
+                        } else {
+                            rs.remaining = fu.latency; // Full latency for other instructions
+                        }
+
+                        // Record start cycle
                         const rob = this.rob.find((r) => r._id === rs._destROBId)!;
                         if (rob.execStartCycle === undefined) rob.execStartCycle = this.cycle;
                         this.instrTiming.get(rs._instrId!)!.execStartCycle = rob.execStartCycle;
-                    } else if (rs.remaining >= 0) {
-                        if (rs.remaining > 0) {
-                            rs.remaining -= 1;
-                        }
+                    }
 
-                        if (rs.remaining === 0) {
-                            // execution finished
-                            const rob = this.rob.find((r) => r._id === rs._destROBId)!;
-                            if (rob.ready) continue; // already marked ready
+                    // Decrement remaining cycles
+                    if (rs.remaining !== undefined && rs.remaining > 0) {
+                        rs.remaining -= 1;
+                    }
 
-                            rob.execCompleteCycle = this.cycle;
-                            this.instrTiming.get(rs._instrId!)!.execCompleteCycle = this.cycle;
+                    if (rs.remaining === 0) {
+                        // Check if this is end of address computation phase for LOAD/STORE
+                        if (
+                            (rs.op === InstructionType.LOAD || rs.op === InstructionType.STORE) &&
+                            rs.storeAddress === undefined &&
+                            rs.computedValue === undefined
+                        ) {
+                            // Address computation complete, compute the address
+                            const a = rs.Vj ?? 0;
+                            const address = (a + (rs.offset ?? 0)) & 0xffff;
 
-                            // compute actual result
-                            const _computedResult = this.computeResult(rs);
-
-                            if (rs.op === InstructionType.CALL) {
-                                // CALL: value to write to R1 is the return address
-                                rs.computedValue = rs.returnAddress; // Store in RS
-                                // Also mark that we need to jump
-                                rob.value = rs.computedValue; // Copy to ROB
-                            } else if (rs.op === InstructionType.RET) {
-                                rs.computedValue = rs.Vj ?? 0; // Return address from R1
-                            } else if (rs.op === InstructionType.BEQ) {
-                                // For BEQ, determine if branch should be taken
-                                const branchTaken = _computedResult === 1;
-                                rs.branchTaken = branchTaken;
-
-                                // Check for misprediction (we predicted not-taken)
-                                // mispredicted if branch was actually taken
-                                // because we are using an implicit always-not-taken branch predictor
-                                rs.mispredicted = branchTaken;
-                                rob.value = rs.branchTaken ? 1 : 0; // just to have some value
+                            if (rs.op === InstructionType.LOAD) {
+                                // For LOAD: save computed address and start memory access phase
+                                rs.computedValue = address; // Save the computed address
+                                rs.remaining = 4; // Memory access: 4 cycles
                             } else if (rs.op === InstructionType.STORE) {
-                                // For STORE, store the computed address for commit stage
-                                rs.storeAddress = _computedResult; // address to write to
-                                rs.storeValue = rs.Vk ?? 0; // value to store
-                                rob.value = _computedResult;
-                            } else {
-                                rob.value = _computedResult;
-                            }
+                                // For STORE: save computed address
+                                rs.storeAddress = address;
 
-                            // ready to be written in the next stage
-                            rob.ready = true;
+                                // Check if store value (Vk) is ready
+                                if (rs.Qk === null || rs.Qk === undefined) {
+                                    // Value is ready, start memory write phase
+                                    rs.storeValue = rs.Vk ?? 0;
+                                    rs.remaining = 4; // Memory write: 4 cycles
+                                } else {
+                                    // Value not ready yet, wait
+                                    rs.waitingForData = true;
+                                    rs.remaining = undefined; // Clear remaining since we're waiting
+                                }
+                            }
+                            continue; // Don't mark as complete yet
                         }
+
+                        // Special handling for STORE waiting for data
+                        if (rs.op === InstructionType.STORE && rs.waitingForData) {
+                            // Check if store value is now ready
+                            if (rs.Qk === null || rs.Qk === undefined) {
+                                rs.storeValue = rs.Vk ?? 0;
+                                rs.remaining = 4; // Start memory write phase
+                                rs.waitingForData = false;
+                            }
+                            continue; // Don't mark as complete yet
+                        }
+
+                        // Execution finished
+                        const rob = this.rob.find((r) => r._id === rs._destROBId)!;
+                        if (rob.ready) continue; // already marked ready
+
+                        rob.execCompleteCycle = this.cycle;
+                        this.instrTiming.get(rs._instrId!)!.execCompleteCycle = this.cycle;
+
+                        // Compute actual result
+                        if (rs.op === InstructionType.CALL) {
+                            // CALL: value to write to R1 is the return address
+                            rs.computedValue = rs.returnAddress; // Store in RS
+                            rob.value = rs.computedValue; // Copy to ROB
+                        } else if (rs.op === InstructionType.RET) {
+                            rs.computedValue = rs.Vj ?? 0; // Return address from R1
+                        } else if (rs.op === InstructionType.BEQ) {
+                            // For BEQ, determine if branch should be taken
+                            const a = rs.Vj ?? 0;
+                            const b = rs.Vk ?? 0;
+                            const branchTaken = a === b;
+                            rs.branchTaken = branchTaken;
+
+                            // Check for misprediction (we predicted not-taken)
+                            rs.mispredicted = branchTaken;
+                            rob.value = rs.branchTaken ? 1 : 0;
+                        } else if (rs.op === InstructionType.STORE) {
+                            // For STORE, address and value are already computed
+                            rob.value = rs.storeAddress;
+                        } else if (rs.op === InstructionType.LOAD) {
+                            // For LOAD, read from memory using computed address
+                            const value = this.memory.get(rs.computedValue ?? 0) ?? 0;
+                            rob.value = value;
+                        } else {
+                            // Regular ALU operations
+                            const _computedResult = this.computeResult(rs);
+                            rob.value = _computedResult;
+                        }
+
+                        // Ready to be written in the next stage
+                        rob.ready = true;
                     }
                 }
             }
@@ -310,46 +367,65 @@ export class CPU {
         const readyRob = this.rob.find((r) => r.ready && r.writeResultCycle === undefined);
         if (!readyRob) return;
 
+        // Find corresponding RS to get instruction-specific data before freeing it
+        let rs: ReservationStation | undefined;
+        for (const stations of this.reservationStationsMap.values()) {
+            rs = stations.find((s) => s._destROBId === readyRob._id);
+            if (rs) break;
+        }
+
+        // Save control flow data to ROB before freeing RS
+        if (rs) {
+            if (rs.op === InstructionType.BEQ) {
+                // Save branch-specific data to ROB for commit stage
+                readyRob.branchTarget = rs.branchTarget;
+                readyRob.mispredicted = rs.mispredicted;
+            } else if (rs.op === InstructionType.CALL) {
+                // Save call target to ROB for commit stage
+                readyRob.callTarget = rs.callTarget;
+            } else if (rs.op === InstructionType.RET) {
+                // Save return address to ROB for commit stage
+                readyRob.returnAddress = rs.computedValue;
+            } else if (rs.op === InstructionType.STORE) {
+                // Save store data to ROB for commit stage
+                readyRob.storeAddress = rs.storeAddress;
+                readyRob.storeValue = rs.storeValue;
+            }
+        }
+
         // For branches and calls, don't broadcast values, just mark as written
-        // Find corresponding RS to check for control flow
         let isControlFlowNoValue = false;
-        for (const stations of this.reservationStationsMap.values()) {
-            for (const rs of stations) {
-                if (rs._destROBId === readyRob._id) {
-                    // Don't broadcast for RET or mispredicted branches
-                    if (rs.mispredicted || readyRob.type === InstructionType.RET) {
-                        isControlFlowNoValue = true;
+        if (rs) {
+            // Don't broadcast for RET or mispredicted branches
+            if (rs.mispredicted || readyRob.type === InstructionType.RET) {
+                isControlFlowNoValue = true;
+            }
+        }
+
+        if (!isControlFlowNoValue) {
+            // Normal writing: write to waiting RS & clear Qj/Qk
+            // (actual writing to the RegFile or Mem is in the Commit stage)
+            for (const stations of this.reservationStationsMap.values()) {
+                for (const rsEntry of stations) {
+                    if (!rsEntry.busy) continue;
+                    if (rsEntry.Qj === readyRob._id) {
+                        rsEntry.Qj = null;
+                        rsEntry.Vj = readyRob.value ?? null;
                     }
-                    break;
-                }
-            }
-            if (isControlFlowNoValue) break;
-        }
-
-        if (isControlFlowNoValue) {
-            readyRob.writeResultCycle = this.cycle;
-            this.instrTiming.get(readyRob._instrId)!.writeResultCycle = this.cycle;
-            return;
-        }
-
-        // Normal writing: write to waiting RS & clear Qj/Qk
-        // (actual writing to the RegFile or Mem is in the Commit stage)
-        for (const stations of this.reservationStationsMap.values()) {
-            for (const rs of stations) {
-                if (!rs.busy) continue;
-                if (rs.Qj === readyRob._id) {
-                    rs.Qj = null;
-                    rs.Vj = readyRob.value ?? null;
-                }
-                if (rs.Qk === readyRob._id) {
-                    rs.Qk = null;
-                    rs.Vk = readyRob.value ?? null;
+                    if (rsEntry.Qk === readyRob._id) {
+                        rsEntry.Qk = null;
+                        rsEntry.Vk = readyRob.value ?? null;
+                    }
                 }
             }
         }
+
         // mark write result
         readyRob.writeResultCycle = this.cycle;
         this.instrTiming.get(readyRob._instrId)!.writeResultCycle = this.cycle;
+
+        // FREE RESERVATION STATION after writing (not in commit)
+        this.freeReservationStation(readyRob._id, readyRob._instrId);
     }
 
     commit() {
@@ -357,13 +433,6 @@ export class CPU {
         if (this.rob.length === 0) return;
         const head = this.rob[0]!;
         if (!head.writeResultCycle) return; // still not written: cannot commit
-
-        // Find corresponding RS for instruction-specific data
-        let rs: ReservationStation | undefined;
-        for (const stations of this.reservationStationsMap.values()) {
-            rs = stations.find((s) => s._destROBId === head._id);
-            if (rs) break;
-        }
 
         // Handle CALL instruction
         if (head.type === InstructionType.CALL) {
@@ -374,14 +443,12 @@ export class CPU {
 
             // Flush pipeline: remove all instructions after CALL (they were speculatively fetched)
             this.flushPipeline(head._instrId);
-            console.log(this.rob)
 
             // Update PC to jump to target
-            this.pc = rs?.callTarget ?? this.pc;
+            this.pc = head.callTarget ?? this.pc;
 
             head.commitCycle = this.cycle;
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
-            this.freeReservationStation(head._id, head._instrId);
             this.rob.shift();
             return;
         }
@@ -392,11 +459,10 @@ export class CPU {
             this.flushPipeline(head._instrId);
 
             // Update PC to return address from R1
-            this.pc = rs?.computedValue ?? this.pc;
+            this.pc = head.returnAddress ?? this.pc;
 
             head.commitCycle = this.cycle;
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
-            this.freeReservationStation(head._id, head._instrId);
             this.rob.shift();
             return;
         }
@@ -405,17 +471,16 @@ export class CPU {
         if (head.type === InstructionType.BEQ) {
             this.totalBranches++;
 
-            if (rs?.mispredicted) {
+            if (head.mispredicted) {
                 this.branchMispredictions++;
                 // Flush pipeline: remove all instructions after this branch
                 this.flushPipeline(head._instrId);
                 // Update PC to branch target
-                this.pc = rs.branchTarget ?? this.pc;
+                this.pc = head.branchTarget ?? this.pc;
             }
 
             head.commitCycle = this.cycle;
             this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
-            this.freeReservationStation(head._id, head._instrId);
             this.rob.shift();
             return;
         }
@@ -424,8 +489,8 @@ export class CPU {
         // Handle STORE instruction
         if (head.type === InstructionType.STORE) {
             // Write to memory
-            if (rs?.storeAddress !== undefined && rs?.storeValue !== undefined) {
-                this.memory.set(rs.storeAddress, rs.storeValue);
+            if (head.storeAddress !== undefined && head.storeValue !== undefined) {
+                this.memory.set(head.storeAddress, head.storeValue);
             }
             // Handle the rest of instruction types
         } else if (head.dest !== undefined && head.dest !== 0) {
@@ -435,9 +500,7 @@ export class CPU {
 
         head.commitCycle = this.cycle;
         this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
-        this.freeReservationStation(head._id, head._instrId);
         this.rob.shift();
-        return;
     }
 
     step() {
@@ -595,6 +658,15 @@ export class CPU {
                     rs._instrId = null;
                     rs.remaining = undefined;
                     rs.offset = undefined;
+                    rs.branchTarget = undefined;
+                    rs.callTarget = undefined;
+                    rs.returnAddress = undefined;
+                    rs.computedValue = undefined;
+                    rs.storeAddress = undefined;
+                    rs.storeValue = undefined;
+                    rs.branchTaken = undefined;
+                    rs.mispredicted = undefined;
+                    rs.waitingForData = undefined;
                 }
             }
         }

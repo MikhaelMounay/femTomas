@@ -16,6 +16,7 @@ export interface ReservationStation {
     _destROBId?: number | null;  // ROB entry id
     _instrId?: number | null;
     remaining?: number;          // cycles remaining for execution
+    waitingForData?: boolean;    // for STORE: address ready, waiting for data
     
     // Instruction-specific data
     offset?: number;             // for LOAD/STORE/BEQ offset
