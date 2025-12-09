@@ -364,7 +364,10 @@ export class CPU {
 
     write() {
         // write results of a single ROB entry per cycle (single issue is assumed to have a single Common Data Bus)
-        const readyRob = this.rob.find((r) => r.ready && r.writeResultCycle === undefined);
+        // STORE instructions skip the write stage since they don't write to registers
+        const readyRob = this.rob.find(
+            (r) => r.ready && r.writeResultCycle === undefined && r.type !== InstructionType.STORE
+        );
         if (!readyRob) return;
 
         // Find corresponding RS to get instruction-specific data before freeing it
@@ -386,10 +389,6 @@ export class CPU {
             } else if (rs.op === InstructionType.RET) {
                 // Save return address to ROB for commit stage
                 readyRob.returnAddress = rs.computedValue;
-            } else if (rs.op === InstructionType.STORE) {
-                // Save store data to ROB for commit stage
-                readyRob.storeAddress = rs.storeAddress;
-                readyRob.storeValue = rs.storeValue;
             }
         }
 
@@ -432,6 +431,40 @@ export class CPU {
         // commit in program order: head of ROB
         if (this.rob.length === 0) return;
         const head = this.rob[0]!;
+
+        // STORE instructions skip write stage and commit directly after execution
+        if (head.type === InstructionType.STORE) {
+            if (!head.ready) return; // execution not complete yet
+
+            // Find corresponding RS to get store data before freeing
+            let rs: ReservationStation | undefined;
+            for (const stations of this.reservationStationsMap.values()) {
+                rs = stations.find((s) => s._destROBId === head._id);
+                if (rs) break;
+            }
+
+            // Save store data to ROB if not already saved
+            if (rs) {
+                head.storeAddress = rs.storeAddress;
+                head.storeValue = rs.storeValue;
+            }
+
+            // Write to memory
+            if (head.storeAddress !== undefined && head.storeValue !== undefined) {
+                this.memory.set(head.storeAddress, head.storeValue);
+            }
+
+            // Mark as committed (skip write stage)
+            head.commitCycle = this.cycle;
+            this.instrTiming.get(head._instrId)!.commitCycle = this.cycle;
+
+            // FREE RESERVATION STATION at commit for STORE
+            this.freeReservationStation(head._id, head._instrId);
+
+            this.rob.shift();
+            return;
+        }
+
         if (!head.writeResultCycle) return; // still not written: cannot commit
 
         // Handle CALL instruction
@@ -485,15 +518,8 @@ export class CPU {
             return;
         }
 
-        // Normal commit (non-branch) to register file or memory depending on instruction
-        // Handle STORE instruction
-        if (head.type === InstructionType.STORE) {
-            // Write to memory
-            if (head.storeAddress !== undefined && head.storeValue !== undefined) {
-                this.memory.set(head.storeAddress, head.storeValue);
-            }
-            // Handle the rest of instruction types
-        } else if (head.dest !== undefined && head.dest !== 0) {
+        // Normal commit (non-branch) to register file
+        if (head.dest !== undefined && head.dest !== 0) {
             // R0 is a read-only zero register
             this.registers[head.dest] = head.value ?? 0;
         }
